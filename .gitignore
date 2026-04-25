@@ -6,3 +6,7 @@ sources/
 queue.txttmp*/
 tmp*/
 .DS_Store
+tmp*/
+.DS_Store
+.idea/
+.junie/
