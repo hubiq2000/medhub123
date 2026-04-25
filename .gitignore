@@ -3,4 +3,4 @@ __pycache__/
 *.log
 *.pyc
 sources/
-queue.txt
+queue.txttmp*/
