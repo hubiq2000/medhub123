@@ -14,30 +14,40 @@ if __package__ is None or __package__ == "":
 from config import LOG_FILE, QUEUE_FILE, RATE_LIMIT_DELAY, REQUEST_TIMEOUT, SOURCES
 
 
-SEARCH_API_URL = "https://www.chpl.com.pl/api/search"
-SEARCH_WEB_URL = "https://www.chpl.com.pl/search"
-BASE_URL = "https://www.chpl.com.pl"
-USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-MIN_REQUEST_DELAY = 2.0
+BASE_URL = "https://rejestrymedyczne.ezdrowie.gov.pl"
+SEARCH_API_URL = f"{BASE_URL}/api/rpl/medicinal-products/public/"
+CHARACTERISTIC_URL_TEMPLATE = f"{BASE_URL}/api/rpl/medicinal-products/{{product_id}}/characteristic"
 
-SECTION_HEADINGS = [
-    "Skład jakościowy i ilościowy",
-    "Postać farmaceutyczna",
-    "Wskazania do stosowania",
-    "Dawkowanie i sposób podawania",
-    "Przeciwwskazania",
-    "Specjalne ostrzeżenia",
-    "Interakcje z innymi lekami",
-    "Działania niepożądane",
-    "Właściwości farmakodynamiczne",
-    "Właściwości farmakokinetyczne",
+USER_AGENT = "pharmavault-agent/1.0 (educational)"
+MIN_REQUEST_DELAY = 1.0
+
+# EMA QRD section number → Polish heading used in output JSON
+SECTION_MAP = [
+    ("4.1", "Wskazania do stosowania"),
+    ("4.2", "Dawkowanie i sposób podawania"),
+    ("4.3", "Przeciwwskazania"),
+    ("4.4", "Specjalne ostrzeżenia"),
+    ("4.5", "Interakcje z innymi lekami"),
+    ("4.8", "Działania niepożądane"),
+    ("5.1", "Właściwości farmakodynamiczne"),
+    ("5.2", "Właściwości farmakokinetyczne"),
+]
+SECTION_HEADINGS = [heading for _, heading in SECTION_MAP]
+ALL_SECTION_NUMBERS = [
+    "4.1", "4.2", "4.3", "4.4", "4.5", "4.6", "4.7", "4.8", "4.9",
+    "5.1", "5.2", "5.3",
+    "6.1", "6.2", "6.3", "6.4", "6.5", "6.6",
 ]
 
 LAST_REQUEST_TS = 0.0
 
 
 def _effective_delay():
-    return max(float(RATE_LIMIT_DELAY), MIN_REQUEST_DELAY)
+    try:
+        configured = float(RATE_LIMIT_DELAY)
+    except (TypeError, ValueError):
+        configured = 0.0
+    return max(configured, MIN_REQUEST_DELAY)
 
 
 def _log(message):
@@ -64,7 +74,10 @@ def _throttled_get(url, params=None):
         response = requests.get(
             url,
             params=params,
-            headers={"User-Agent": USER_AGENT},
+            headers={
+                "User-Agent": USER_AGENT,
+                "Accept-Language": "pl",
+            },
             timeout=REQUEST_TIMEOUT,
         )
         LAST_REQUEST_TS = time.time()
@@ -83,31 +96,6 @@ def _clean_text(text):
     return cleaned
 
 
-def _normalize_heading(text):
-    normalized = _clean_text(text).lower()
-    normalized = re.sub(r"^\d+(?:\.\d+)*\.?\s*", "", normalized)
-    normalized = re.sub(r"\s*:\s*$", "", normalized)
-    normalized = re.sub(r"\s+", " ", normalized)
-    return normalized.strip()
-
-
-def _heading_match(line_text):
-    normalized_line = _normalize_heading(line_text)
-    if not normalized_line or len(normalized_line) > 200:
-        return None
-
-    for heading in SECTION_HEADINGS:
-        normalized_heading = _normalize_heading(heading)
-        if normalized_line == normalized_heading:
-            return heading
-        if normalized_line.startswith(normalized_heading + " "):
-            return heading
-        if normalized_heading in normalized_line and len(normalized_line) <= len(normalized_heading) + 35:
-            return heading
-
-    return None
-
-
 def _slugify(drug_name):
     return str(drug_name).strip().lower().replace(" ", "_")
 
@@ -116,200 +104,127 @@ def _output_path_for_drug(drug_name):
     return os.path.join(SOURCES["chpl"], f"{_slugify(drug_name)}.json")
 
 
-def _normalize_url(url):
-    if not url:
-        return ""
-    if url.startswith("http://") or url.startswith("https://"):
-        return url
-    if url.startswith("/"):
-        return f"{BASE_URL}{url}"
-    return f"{BASE_URL}/{url}"
-
-
-def _extract_id(value):
-    if value is None:
-        return ""
-    as_text = str(value).strip()
-    if as_text:
-        return as_text
-    return ""
-
-
-def _normalize_search_item(item):
-    if not isinstance(item, dict):
-        return None
-
-    name = item.get("name") or item.get("nazwa") or item.get("title") or item.get("productName")
-    url = item.get("url") or item.get("link") or item.get("href")
-    item_id = item.get("id") or item.get("productId") or item.get("uuid")
-
-    if not url and item.get("slug"):
-        url = item.get("slug")
-
-    normalized_name = _clean_text(name)
-    normalized_url = _normalize_url(_clean_text(url)) if url else ""
-    normalized_id = _extract_id(item_id)
-
-    if not normalized_url:
-        return None
-
-    if not normalized_name:
-        normalized_name = normalized_url.rstrip("/").split("/")[-1].replace("-", " ").strip()
-
-    if not normalized_id:
-        id_match = re.search(r"(\d+)", normalized_url)
-        if id_match:
-            normalized_id = id_match.group(1)
-
-    return {
-        "name": normalized_name,
-        "url": normalized_url,
-        "id": normalized_id,
-    }
-
-
-def _extract_search_items_from_payload(payload):
-    if isinstance(payload, list):
-        return payload
-
-    if not isinstance(payload, dict):
-        return []
-
-    for key in ("results", "items", "content", "data", "hits"):
-        value = payload.get(key)
-        if isinstance(value, list):
-            return value
-
-    return []
-
-
-def search_drug(drug_name):
+def search_ezdrowie(drug_name):
+    """Search official Polish drug registry by name."""
     query = _clean_text(drug_name)
     if not query:
         return []
 
-    api_response = _throttled_get(SEARCH_API_URL, params={"query": query, "limit": 5})
-    if api_response is not None:
-        try:
-            payload = api_response.json()
-            parsed = []
-            seen_urls = set()
-            for item in _extract_search_items_from_payload(payload):
-                normalized = _normalize_search_item(item)
-                if not normalized:
-                    continue
-                if normalized["url"] in seen_urls:
-                    continue
-                seen_urls.add(normalized["url"])
-                parsed.append(normalized)
-                if len(parsed) >= 5:
-                    break
-
-            if parsed:
-                return parsed
-        except json.JSONDecodeError as error:
-            _log(f"[CHPL] Failed to parse API search response for '{query}': {error}")
-
-    web_response = _throttled_get(SEARCH_WEB_URL, params={"q": query})
-    if web_response is None:
+    response = _throttled_get(
+        SEARCH_API_URL,
+        params={"name": query, "page": 0, "size": 5},
+    )
+    if response is None:
+        _log(f"[CHPL] search '{query}' → 0 results")
         return []
 
     try:
-        soup = BeautifulSoup(web_response.text, "html.parser")
-    except Exception as error:
-        _log(f"[CHPL] Failed to parse HTML search response for '{query}': {error}")
+        payload = response.json()
+    except (ValueError, json.JSONDecodeError) as error:
+        _log(f"[CHPL] Failed to parse search JSON for '{query}': {error}")
         return []
 
+    items = []
+    if isinstance(payload, dict):
+        candidate = payload.get("content")
+        if isinstance(candidate, list):
+            items = candidate
+        else:
+            for key in ("results", "items", "data", "hits"):
+                value = payload.get(key)
+                if isinstance(value, list):
+                    items = value
+                    break
+    elif isinstance(payload, list):
+        items = payload
+
     results = []
-    seen_urls = set()
-
-    for link in soup.find_all("a", href=True):
-        href = _clean_text(link.get("href"))
-        if not href:
+    for item in items:
+        if not isinstance(item, dict):
             continue
-        if "search" in href and "q=" in href:
-            continue
-
-        normalized_url = _normalize_url(href)
-        if BASE_URL not in normalized_url:
-            continue
-        if normalized_url in seen_urls:
-            continue
-
-        link_text = _clean_text(link.get_text(" ", strip=True))
-        if not link_text:
-            continue
-
-        if query.lower() not in link_text.lower() and query.lower() not in normalized_url.lower():
-            continue
-
-        seen_urls.add(normalized_url)
-
-        id_match = re.search(r"(\d+)", normalized_url)
-        item_id = id_match.group(1) if id_match else ""
-
-        results.append(
-            {
-                "name": link_text,
-                "url": normalized_url,
-                "id": item_id,
-            }
+        item_id = item.get("id") or item.get("productId") or item.get("uuid")
+        name = (
+            item.get("medicinalProductName")
+            or item.get("productName")
+            or item.get("name")
+            or item.get("nazwaProduktu")
+            or item.get("nazwa")
         )
+        if item_id is None:
+            continue
+        results.append({
+            "id": str(item_id).strip(),
+            "name": _clean_text(name),
+        })
 
-        if len(results) >= 5:
-            break
-
+    _log(f"[CHPL] search '{query}' → {len(results)} results")
     return results
 
 
-def scrape_chpl(drug_url):
-    data = {heading: "" for heading in SECTION_HEADINGS}
+def fetch_chpl_text(product_id):
+    """Fetch raw CHPL document (HTML or text) for a given product id."""
+    pid = _clean_text(product_id)
+    if not pid:
+        return ""
 
-    response = _throttled_get(drug_url)
+    url = CHARACTERISTIC_URL_TEMPLATE.format(product_id=pid)
+    response = _throttled_get(url)
     if response is None:
-        return data
+        return ""
 
     try:
-        soup = BeautifulSoup(response.text, "html.parser")
+        if not response.encoding:
+            response.encoding = "utf-8"
+        return response.text or ""
     except Exception as error:
-        _log(f"[CHPL] Failed to parse CHPL page {drug_url}: {error}")
-        return data
+        _log(f"[CHPL] Failed to decode characteristic for {pid}: {error}")
+        return ""
 
-    for tag_name in ("script", "style", "noscript"):
-        for tag in soup.find_all(tag_name):
-            tag.decompose()
 
-    lines = []
-    for raw_line in soup.get_text("\n").splitlines():
-        cleaned_line = _clean_text(raw_line)
-        if cleaned_line:
-            lines.append(cleaned_line)
+def parse_chpl_sections(raw_text):
+    """Parse EMA QRD numbered sections (4.1, 4.2, ... 5.2) from CHPL raw text/HTML."""
+    result = {heading: "" for heading in SECTION_HEADINGS}
+    if not raw_text:
+        return result
 
-    heading_positions = []
-    seen = set()
-    for index, line in enumerate(lines):
-        heading = _heading_match(line)
-        if heading and (heading, index) not in seen:
-            heading_positions.append((heading, index))
-            seen.add((heading, index))
+    # Strip HTML to plain text while preserving line breaks between blocks.
+    try:
+        soup = BeautifulSoup(raw_text, "html.parser")
+        for tag_name in ("script", "style", "noscript"):
+            for tag in soup.find_all(tag_name):
+                tag.decompose()
+        plain = soup.get_text("\n")
+    except Exception:
+        plain = re.sub(r"<[^>]+>", "\n", raw_text)
 
-    if not heading_positions:
-        return data
+    # Normalize whitespace per line, drop empty lines.
+    lines = [re.sub(r"\s+", " ", line).strip() for line in plain.splitlines()]
+    plain = "\n".join(line for line in lines if line)
 
-    heading_positions.sort(key=lambda pair: pair[1])
+    # Find every section-number header occurrence.
+    pattern = re.compile(
+        r"(?m)^\s*(?P<num>\d+\.\d+)(?:\.|\s|\)|:)\s*(?P<rest>.*)$"
+    )
 
-    for position, (heading, start_index) in enumerate(heading_positions):
-        if heading not in data:
+    matches = []
+    for m in pattern.finditer(plain):
+        num = m.group("num")
+        if num in ALL_SECTION_NUMBERS:
+            matches.append((num, m.start(), m.end()))
+
+    if not matches:
+        return result
+
+    wanted = {num: heading for num, heading in SECTION_MAP}
+
+    for index, (num, _start, end) in enumerate(matches):
+        if num not in wanted:
             continue
+        next_start = matches[index + 1][1] if index + 1 < len(matches) else len(plain)
+        body = plain[end:next_start]
+        result[wanted[num]] = _clean_text(body)
 
-        end_index = len(lines)
-        if position + 1 < len(heading_positions):
-            end_index = heading_positions[position + 1][1]
-
-        content_lines = lines[start_index + 1 : end_index]
-        data[heading] = _clean_text(" ".join(content_lines))
-
-    return data
+    return result
 
 
 def save_chpl(drug_name, data):
@@ -327,7 +242,8 @@ def save_chpl(drug_name, data):
         _log(f"[CHPL] Failed to create destination directory {destination_dir}: {error}")
         return None
 
-    payload = {heading: _clean_text(data.get(heading, "")) for heading in SECTION_HEADINGS}
+    source = data or {}
+    payload = {heading: _clean_text(source.get(heading, "")) for heading in SECTION_HEADINGS}
 
     try:
         with open(destination_path, "w", encoding="utf-8") as output_file:
@@ -349,21 +265,21 @@ def process_drug(drug_name):
         _log(f"[CHPL] Already downloaded, skipping: {existing_path}")
         return existing_path
 
-    results = search_drug(drug_name)
+    results = search_ezdrowie(drug_name)
     if not results:
-        _log(f"[CHPL] No search results for '{drug_name}'")
+        _log(f"[CHPL] {drug_name} → not found in URPL")
+        save_chpl(drug_name, {})
         return None
 
-    first_result = results[0]
-    drug_url = first_result.get("url")
-    if not drug_url:
-        _log(f"[CHPL] First search result has no URL for '{drug_name}'")
-        return None
+    first = results[0]
+    product_id = first.get("id", "")
+    raw_text = fetch_chpl_text(product_id)
+    sections = parse_chpl_sections(raw_text)
 
-    scraped_data = scrape_chpl(drug_url)
-    saved_path = save_chpl(drug_name, scraped_data)
+    saved_path = save_chpl(drug_name, sections)
+    filled = sum(1 for heading in SECTION_HEADINGS if sections.get(heading))
     if saved_path:
-        _log(f"[CHPL] Saved '{drug_name}' to {saved_path}")
+        _log(f"[CHPL] {drug_name} → saved {filled} sections (product_id: {product_id})")
 
     return saved_path
 

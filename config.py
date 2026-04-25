@@ -11,11 +11,21 @@ LOG_FILE = f"{VAULT_PATH}/agent.log"
 QUEUE_FILE = f"{VAULT_PATH}/queue.txt"
 SOURCES = {
     "urpl": f"{VAULT_PATH}/sources/urpl",
+    "urpl_bulletins": f"{VAULT_PATH}/sources/urpl_bulletins",
     "chpl": f"{VAULT_PATH}/sources/chpl",
     "mp": f"{VAULT_PATH}/sources/mp",
     "pubmed": f"{VAULT_PATH}/sources/pubmed",
-    "pmc": f"{VAULT_PATH}/sources/pmc",
     "ema": f"{VAULT_PATH}/sources/ema",
-    "fda": f"{VAULT_PATH}/sources/fda",
     "gif": f"{VAULT_PATH}/sources/gif",
+}
+
+# Hardcoded source priority (do not change at runtime)
+SOURCE_PRIORITY = ["chpl", "gif", "urpl", "ema", "pubmed"]
+
+SOURCE_LABELS = {
+    "chpl": "[CHPL]",
+    "gif": "[GIF]",
+    "urpl": "[URPL]",
+    "ema": "[EMA]",
+    "pubmed": "[PubMed]",
 }

@@ -1,7 +1,7 @@
-# pharmavault-agent
+# medhub
 
-`pharmavault-agent` is a local pharmacy research agent scaffold. It is designed to collect drug data from Polish and
-international sources, process it with a local Ollama LLM, and save structured Markdown notes to a vault on disk.
+`medhub` is a local pharmacy research agent scaffold. It collects drug data from multiple sources,
+processes it with a local Ollama model, and saves structured Markdown notes for an Obsidian vault.
 
 ## Requirements
 
@@ -31,33 +31,19 @@ python -c "import config; print(config.VAULT_PATH)"
 
 ## Running collectors
 
-Collector packages are scaffolded under `collectors/` and are intended to expose runnable modules (for example
-`collectors.urpl`, `collectors.chpl`, etc.).
-
-Run a collector module with:
+Run collectors directly from the project root, for example:
 
 ```bash
-python -m collectors.<collector_name>
-```
-
-Example:
-
-```bash
-python -m collectors.urpl
+python collectors/urpl_collector.py
+python collectors/chpl_scraper.py paracetamol
 ```
 
 ## Running the scheduler
 
-Scheduler package is scaffolded under `scheduler/`.
-
-Run the scheduler module with:
+Run batch note generation with:
 
 ```bash
-python -m scheduler
+python scheduler/cron_runner.py --batch 5
 ```
 
-If you create a dedicated entry module (for example `scheduler.main`), run:
-
-```bash
-python -m scheduler.main
-```
+You can omit `--batch` to use `BATCH_SIZE` from `config.py`.
